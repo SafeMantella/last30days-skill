@@ -7,7 +7,6 @@ import os
 import random
 import re
 import socket
-import sys
 import threading
 import time
 import urllib.error
@@ -88,6 +87,53 @@ def retry_delay_from_headers(headers, fallback):
 MIN_DNS_RETRIES = 3
 USER_AGENT = "last30days-skill/3.0 (Assistant Skill)"
 
+# urllib copies almost all headers across 3xx; strip credentials when origin changes (#1062).
+_CROSS_ORIGIN_AUTH_HEADERS = frozenset(
+    {"authorization", "x-api-key", "x-csrf-token", "x-subscription-token"}
+)
+
+
+def _request_origin(url: str) -> tuple[str, str, int]:
+    parts = urlsplit(url)
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").lower()
+    if parts.port is not None:
+        port = parts.port
+    elif scheme == "https":
+        port = 443
+    elif scheme == "http":
+        port = 80
+    else:
+        port = 0
+    return scheme, host, port
+
+
+class _StripAuthOnCrossOriginRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        if _request_origin(req.full_url) != _request_origin(new.full_url):
+            for store in (new.headers, getattr(new, "unredirected_hdrs", None)):
+                if not store:
+                    continue
+                for name in list(store):
+                    if name.lower() in _CROSS_ORIGIN_AUTH_HEADERS:
+                        del store[name]
+        return new
+
+
+_opener = urllib.request.build_opener(_StripAuthOnCrossOriginRedirect)
+_DEFAULT_URLOPEN = urllib.request.urlopen
+
+
+def _open_request(req, timeout):
+    """Honor test patches of urllib.request.urlopen; otherwise use the strip opener."""
+    current = urllib.request.urlopen
+    if current is not _DEFAULT_URLOPEN:
+        return current(req, timeout=timeout)
+    return _opener.open(req, timeout=timeout)
+
 _failure_sink: ContextVar[Optional[list["HTTPError"]]] = ContextVar(
     "last30days_http_failure_sink",
     default=None,
@@ -99,7 +145,17 @@ _expected_miss_statuses: ContextVar[frozenset[int]] = ContextVar(
 
 _FIXTURE_FORMAT = "last30days-http-fixture/v1"
 _FIXTURE_SECRET_KEYS = frozenset(
-    {"api_key", "apikey", "authorization", "cookie", "key", "secret", "token"}
+    {
+        "api_key", "apikey", "authorization", "cookie", "key", "secret", "token",
+        "password", "passwd", "passphrase", "credential", "bearer", "jwt",
+    }
+)
+# Suffixes are matched on the normalized key, where camelCase collapses without
+# a separator ("accessJwt" -> "accessjwt"), so these are bare rather than
+# underscore-prefixed. "key" is deliberately absent: it would redact "monkey".
+_FIXTURE_SECRET_KEY_SUFFIXES = (
+    "_api_key", "apikey", "_authorization", "_cookie", "_secret", "_token",
+    "password", "passwd", "passphrase", "credential", "jwt",
 )
 _fixture_lock = threading.Lock()
 _fixture_state: Optional[dict[str, Any]] = None
@@ -114,7 +170,7 @@ def _is_secret_key(value: object) -> bool:
     key = re.sub(r"[^a-z0-9]+", "_", str(value).lower()).strip("_")
     return (
         key in _FIXTURE_SECRET_KEYS
-        or key.endswith(("_api_key", "_authorization", "_cookie", "_secret", "_token"))
+        or key.endswith(_FIXTURE_SECRET_KEY_SUFFIXES)
     )
 
 
@@ -147,10 +203,19 @@ def _scrub_fixture_value(
     return value
 
 
+_AUTH_SCHEME_RE = re.compile(r"^(?:bearer|basic|token)\s+(\S+)$", re.IGNORECASE)
+
+
 def _collect_secret_values(value: Any, *, key: str = "") -> set[str]:
     values: set[str] = set()
     if key and _is_secret_key(key) and value not in (None, ""):
-        values.add(str(value))
+        text = str(value)
+        values.add(text)
+        # "Bearer <token>": the bare token is what a response body or an
+        # adapter error message echoes, so redact it on its own too.
+        scheme = _AUTH_SCHEME_RE.match(text.strip())
+        if scheme:
+            values.add(scheme.group(1))
         return values
     if isinstance(value, dict):
         for child_key, child_value in value.items():
@@ -175,7 +240,54 @@ def _fixture_redactions(
         pass
     values.update(_collect_secret_values(headers))
     values.update(_collect_secret_values(json_data))
+    # Session-wide secret values (process env plus resolved config) so a
+    # bearer loaded from .env, Keychain, or pass is scrubbed at the HTTP
+    # seam even when this request carried it only in a header.
+    with _fixture_lock:
+        state = _fixture_state
+        if state is not None and state.get("redactions"):
+            values.update(state["redactions"])
     return frozenset(values)
+
+
+def config_secret_values(config: Dict[str, Any]) -> frozenset[str]:
+    """Secret VALUES from a resolved config, for fixture redaction.
+
+    Every key the Keychain/pass loader knows (``env.KEYCHAIN_KEYS``) plus any
+    secret-named key is a credential regardless of which layer supplied it.
+    """
+    values: set[str] = set()
+    try:
+        from . import env as _env
+        secret_keys = set(_env.KEYCHAIN_KEYS)
+    except Exception:  # pragma: no cover - env is always importable
+        secret_keys = set()
+    for key, value in (config or {}).items():
+        if not isinstance(value, str) or len(value) < 4:
+            continue
+        if "://" in value:
+            # An endpoint (e.g. an API base URL) is an address, not a credential.
+            continue
+        if key in secret_keys or _is_secret_key(key):
+            values.add(value)
+    return frozenset(values)
+
+
+def add_fixture_redactions(values) -> None:
+    """Register secret values with the active recording session, if any.
+
+    ``env.get_config`` calls this with the resolved config's secrets so a
+    bearer loaded from a file or a credential store is redacted at both the
+    HTTP seam and the module seam. A no-op outside a recording session.
+    """
+    extra = {v for v in values if isinstance(v, str) and len(v) >= 4}
+    if not extra:
+        return
+    with _fixture_lock:
+        state = _fixture_state
+        if state is None or state["mode"] != "record":
+            return
+        state["redactions"] = frozenset(state.get("redactions") or frozenset()) | extra
 
 
 def _scrub_fixture_url(url: str) -> str:
@@ -234,7 +346,9 @@ def recording_requests(path: str | Path):
             "source_exchanges": [],
             # Secret VALUES from the environment, so module-seam recordings
             # scrub tokens echoed inside normal string fields (adapter error
-            # messages, parsed item text), not just secret-named keys.
+            # messages, parsed item text), not just secret-named keys. The
+            # resolved config's secrets join via add_fixture_redactions once
+            # env.get_config runs inside the session.
             "redactions": frozenset(
                 value
                 for key, value in os.environ.items()
@@ -256,13 +370,26 @@ def recording_requests(path: str | Path):
                 "exchanges": state["exchanges"],
                 "source_exchanges": state["source_exchanges"],
             }
+            # A recorded exchange is credential-adjacent by construction:
+            # redaction is key-name driven, so an unrecognized key name leaves
+            # a real value on disk. Create the temp file 0600 at open time
+            # rather than chmod-ing after the write, or the credentials sit in
+            # a world-readable file for the length of the write (the parent
+            # directory is caller-supplied and not guaranteed private).
+            # Mirrors last30days.save_output. Unlink first so a stale or
+            # pre-planted temp file cannot be reused with its own wider mode --
+            # O_CREAT does not alter the mode of an existing file.
             temporary = target.with_name(f".{target.name}.tmp")
-            temporary.write_text(
-                json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
+            temporary.unlink(missing_ok=True)
+            fd = os.open(
+                temporary,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
             )
-            if os.name != "nt":
-                temporary.chmod(0o644)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+                )
             temporary.replace(target)
 
 
@@ -351,6 +478,12 @@ def _fixture_record(
         state = _fixture_state
         if state is None or state["mode"] != "record":
             return
+        # Union the session's env-derived secret VALUES in, so a credential
+        # echoed back inside an ordinary response field is scrubbed on this
+        # path too, not only on the source-record path. Response scrubbing does
+        # not feed _fixture_key, so this cannot make a replay key
+        # machine-dependent.
+        redactions = redactions | (state.get("redactions") or frozenset())
         response: dict[str, Any]
         if error is None:
             response = {"value": _scrub_fixture_value(value, redactions=redactions)}
@@ -553,14 +686,28 @@ def classify_failure(*, status_code: Optional[int] = None, message: str = "") ->
         marker in text for marker in ("http 429", "status 429", "rate limit", "too many requests")
     ):
         return health.RATE_LIMITED
-    if status_code in (401, 402, 403) or any(
+    # Credit exhaustion is checked before the auth branch: a 402 (or a body
+    # saying the account has no credits) asks the user to top up, not to
+    # re-authenticate. Markers stay narrow on purpose: the bare word "credits"
+    # is not one ("10,000 free credits" is onboarding copy, not a failure).
+    if status_code == 402 or any(
+        marker in text
+        for marker in (
+            "http 402",
+            "status 402",
+            "payment required",
+            "insufficient credits",
+            "does not have any credits",
+            "out of credits",
+        )
+    ):
+        return health.PAYMENT_REQUIRED
+    if status_code in (401, 403) or any(
         marker in text
         for marker in (
             "http 401",
-            "http 402",
             "http 403",
             "status 401",
-            "status 402",
             "status 403",
             "unauthorized",
             "forbidden",
@@ -675,8 +822,11 @@ def request(
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
 
+    def log_request(message: str) -> None:
+        log(_scrub_fixture_value(message, redactions=fixture_redactions))
+
     safe_url = re.sub(r'([?&])(key|api_key|token|secret)=[^&]*', r'\1\2=***', url)
-    log(f"{method} {safe_url}")
+    log_request(f"{method} {safe_url}")
 
     last_error = None
     rate_limit_count = 0
@@ -705,13 +855,25 @@ def request(
         time.sleep(delay)
         return True
 
-    def open_and_read(request_timeout: float) -> tuple[int, str]:
-        with urllib.request.urlopen(req, timeout=request_timeout) as response:
-            return response.status, response.read().decode('utf-8')
+    def open_and_read(
+        request_timeout: float,
+    ) -> tuple[int, str | None, urllib.error.HTTPError | None]:
+        try:
+            with _open_request(req, request_timeout) as response:
+                return response.status, response.read().decode('utf-8'), None
+        except urllib.error.HTTPError as error:
+            # Error bodies can stall just like successful bodies. Read both
+            # inside the same deadline-protected worker before classification.
+            body = None
+            try:
+                body = error.read().decode('utf-8')
+            except (OSError, UnicodeDecodeError):
+                pass
+            return error.code, body, error
 
     def open_and_read_before_deadline(
         request_timeout: float,
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str | None, urllib.error.HTTPError | None]:
         """Stop waiting at the wall deadline, even during DNS or body reads."""
         if deadline_monotonic is None:
             return open_and_read(request_timeout)
@@ -747,13 +909,16 @@ def request(
                 break
             request_timeout = min(timeout, remaining)
         try:
-            response_status, body = open_and_read_before_deadline(request_timeout)
+            response_status, body, response_error = open_and_read_before_deadline(request_timeout)
             if (
                 deadline_monotonic is not None
                 and time.monotonic() >= deadline_monotonic
             ):
                 raise_recorded(deadline_error())
-            log(f"Response: {response_status} ({len(body)} bytes)")
+            if response_error is not None:
+                raise response_error
+            body = body or ""
+            log_request(f"Response: {response_status} ({len(body)} bytes)")
             if raw:
                 _fixture_record(fixture_request, value=body, redactions=fixture_redactions)
                 return body
@@ -763,15 +928,10 @@ def request(
         except DeadlineExceeded as exc:
             raise_recorded(exc)
         except urllib.error.HTTPError as e:
-            body = None
-            try:
-                body = e.read().decode('utf-8')
-            except (OSError, UnicodeDecodeError):
-                pass
-            log(f"HTTP Error {e.code}: {e.reason}")
+            log_request(f"HTTP Error {e.code}: {e.reason}")
             if body:
-                snippet = " ".join(body.split())
-                log(f"Error body: {snippet[:200]}")
+                snippet = _scrub_fixture_value(" ".join(body.split()), redactions=fixture_redactions)
+                log_request(f"Error body: {snippet[:200]}")
             last_error = HTTPError(f"HTTP {e.code}: {e.reason}", e.code, body)
 
             # Don't retry client errors (4xx) except rate limits
@@ -794,7 +954,7 @@ def request(
                         getattr(e, "headers", None),
                         RETRY_DELAY * (2 ** attempt) + 1,
                     )
-                    log(f"Rate limited (429). Waiting {delay:.1f}s before retry {attempt + 2}/{retries}")
+                    log_request(f"Rate limited (429). Waiting {delay:.1f}s before retry {attempt + 2}/{retries}")
                 else:
                     delay = RETRY_DELAY * (2 ** attempt)
                 if not sleep_before_retry(delay):
@@ -805,7 +965,7 @@ def request(
                 # widening is DNS-only — don't grant extra HTTP attempts.
                 break
         except urllib.error.URLError as e:
-            log(f"URL Error: {e.reason}")
+            log_request(f"URL Error: {e.reason}")
             reason = getattr(e, "reason", None)
             # urllib commonly wraps socket.timeout (an alias of TimeoutError
             # since 3.10) in URLError; classify those as timeouts, not
@@ -823,14 +983,14 @@ def request(
                 # causes don't bypass the regular retry budget.
                 dns_attempts += 1
                 if effective_retries < MIN_DNS_RETRIES:
-                    log(
+                    log_request(
                         f"DNS resolution failed; expanding retry budget from "
                         f"{effective_retries} to {MIN_DNS_RETRIES}"
                     )
                     effective_retries = MIN_DNS_RETRIES
                 if attempt < effective_retries - 1:
                     delay = 2 ** (dns_attempts - 1)  # 1s, 2s, 4s, 8s, ...
-                    log(
+                    log_request(
                         f"DNS resolution failure (attempt {dns_attempts}); "
                         f"retrying in {delay:.1f}s"
                     )
@@ -847,7 +1007,7 @@ def request(
                 # to non-DNS error paths.
                 break
         except json.JSONDecodeError as e:
-            log(f"JSON decode error: {e}")
+            log_request(f"JSON decode error: {e}")
             last_error = HTTPError(
                 f"Invalid JSON response: {e}",
                 outcome_state=health.SCHEMA_DRIFT,
@@ -855,7 +1015,7 @@ def request(
             raise_recorded(last_error)
         except (OSError, TimeoutError, ConnectionResetError) as e:
             # Handle socket-level errors (connection reset, timeout, etc.)
-            log(f"Connection error: {type(e).__name__}: {e}")
+            log_request(f"Connection error: {type(e).__name__}: {e}")
             state = health.TIMEOUT if isinstance(e, TimeoutError) else health.UNREACHABLE
             last_error = HTTPError(
                 f"Connection error: {type(e).__name__}: {e}",

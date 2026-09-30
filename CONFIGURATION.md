@@ -48,6 +48,7 @@ The engine's `.env` reader doesn't expand `$HOME` — only the tilde, via `Path(
 - `--json-profile {agent,raw}` - select the research JSON shape used with `--emit=json`. `agent` is the default, versioned workflow contract; `raw` preserves the full internal `Report` dump for debugging and power users. See the [JSON export reference](docs/reference/json-export.md).
 - `--corpus <dir>` - add a local `.md`/`.txt` directory as a private ranked source; repeat the flag for multiple directories. PDFs are extracted only when `pdftotext` is on PATH and otherwise skip with a note. File modification time supplies recency, so the normal research window applies.
 - `--corpus-all-time` - include relevant registered files whose modification time is older than the current research window. Without this flag, a 30-day run includes only files modified in those 30 days.
+- `--perplexity-search-type {fast,web}` - search type for direct Perplexity Search API and Agent `web_search` requests on this run; overrides `LAST30DAYS_PERPLEXITY_SEARCH_TYPE`. It does not enable the Perplexity source and needs a direct `PERPLEXITY_API_KEY`. When the hosted backend is configured and a direct `PERPLEXITY_API_KEY` exists, this flag makes the run execute locally with one stderr notice; without a direct key the run stays hosted and prints a note that the flag was not applied; a value set only in `LAST30DAYS_PERPLEXITY_SEARCH_TYPE` keeps hosted routing and prints a note that it was not applied.
 - `--register {default,exec,dev,creator,eli5}` - shape a standard single-topic Markdown or HTML research brief for its audience. `exec` is decisions-first with five core findings and numbers up top; `dev` gives GitHub, code, and technical signals more room; `creator` leads with hooks, Best Takes, community reactions, and virality metrics; `eli5` keeps the established evidence layout and asks the synthesizing agent for accessible language. Registers do not change retrieval, JSON exports, discovery, drill, library feed/search, or comparison output.
 - `--discover [domain]` - trending discovery, two-stage: a river-listing sweep NOMINATES candidate topics, then each nomination gets a full research pass (Reddit with comments, X, YouTube, Techmeme, arXiv, HN, Polymarket, web) before ranking. Bare `--discover` (no domain) is **global trending**: every feed's own hot list (r/all rising/top-week, Hacker News front/best, Digg clusters when `digg-pp-cli` is on PATH) with no keyword gate; with a domain, the sweep is category-scoped and keyword-gated, and broad X activity joins when an X backend is authenticated. Every topic must clear a confidence floor (cross-source confirmation or a genuinely strong single-source spike); when nothing clears it the run reports "Nothing solid this window" instead of ranked noise. Run without a positional topic; it is mutually exclusive with `--drill`. `--emit=json` uses the separate versioned discovery contract (now with `outcome`, `weak_signal`, per-topic `top_comment` and `corroboration_count`) documented in the [JSON export reference](docs/reference/json-export.md).
 - `--discover-shallow` - skip discovery's per-topic research passes and rank on listing evidence only. Faster and thinner; the confidence floor still applies. An explicit `--search` source list bounds both the sweep and the research passes. On a protocol run (below), adding it to the `--nominate-only` leg marks the bundle quick-tier so the resume leg uses the faster shallow research pass.
@@ -66,7 +67,7 @@ The engine's `.env` reader doesn't expand `$HOME` — only the tilde, via `Path(
 - `LAST30DAYS_LIBRARY_OWNER=<name>` - optional feed-level Atom author. Defaults to `last30days research library`.
 - `LAST30DAYS_LIBRARY_CONTEXT=on|off` - controls passive prior-run context on fresh research reports. It defaults to `on`; matching saved research appears in a short `From your library` section. Set `off` to skip the local index read and leave reports unchanged. Mock runs, eval replays, and internal fan-out subruns do not load library context, keeping fixtures deterministic.
 - `--publish-password <password>` - optional shared password for `--publish-html` or `library feed --publish`. Prefer `LAST30DAYS_PUBLISH_PASSWORD=<password>` instead so the password is not visible in the process list or shell history. Use a unique non-personal password; never reuse the user's own password. The provider's update key is treated as secret and is not written to stdout, HTML, raw output, or `.publish.json` metadata.
-- `--preflight` - print a human-readable permission preflight. It reports config source, project config trust/ignore state, browser-cookie plan, planned writes, optional commands, source availability, and endpoint overrides without reading browser cookies, writing setup/config/report files, or running research. Add `--emit=json` for the separate machine-readable preflight contract (`--json-profile` does not change it); use `--diagnose` when you need the full source diagnostic JSON.
+- `--preflight` - optional permission inspector. It reports config source, project config trust/ignore state, browser-cookie plan, planned writes, optional commands, source availability, and endpoint overrides without reading browser cookies, writing setup/config/report files, or running research. First-run setup does not require it. Add `--emit=json` for the separate machine-readable preflight contract (`--json-profile` does not change it); use `--diagnose` when you need the full source diagnostic JSON. `doctor` is the health surface.
 - `--welcome` - print the first-run welcome text (engine-owned; the skill relays it verbatim on first run). Safe: prints and exits, no reads or writes.
 - `--record-fixtures <dir>` - developer-only, hidden flag that records scrubbed source responses for the offline research-quality eval harness. It writes `<dir>/http.json`; see the [eval reference](docs/reference/eval.md) before recording or committing fixtures.
 - `setup --github-start` / `setup --github-poll` - the two-command ScrapeCreators GitHub device-auth split. `--github-start` submits the device flow, copies the code to the clipboard, opens the browser, and returns the code immediately (foreground); `--github-poll` waits for you to authorize and persists the key. `setup --github` still runs both in one shot for back-compat.
@@ -79,12 +80,13 @@ Every completed research pass writes a structured `last-report.json` cache besid
 
 ## First-run onboarding
 
-On the very first `/last30days` run (no `~/.config/last30days/.env`, or `SETUP_COMPLETE` not set), the skill runs a consent-driven onboarding the model drives in chat. It takes one of two forms depending on the host:
+On the very first `/last30days` run (no `~/.config/last30days/.env`, or `SETUP_COMPLETE` not set), the skill runs a consent-driven onboarding the model drives in chat. It takes one of three forms depending on the host:
 
 - **Claude Code Modal Flow** - the restored v3.0.0 guided NUX, used on hosts with `AskUserQuestion` (Claude Code). A welcome message, then modals for Auto/Manual/Skip setup, cookie consent, the ScrapeCreators signup offer, a TikTok/Instagram `INCLUDE_SOURCES` opt-in, and a first-topic picker.
 - **Non-Modal Prose Flow** - the same work done conversationally on hosts without modals (OpenClaw, Codex, Cursor, Gemini CLI, Grok, raw CLI).
+- **Grok Bot Prose Flow** - the prose flow on a Grok Bot host (`LAST30DAYS_HOST=grok-bot`, persisted to `.env` by this setup). It has no browser-session step: X is set up through the bot's X connector, with `X_BEARER_TOKEN` or `XAI_API_KEY` as backups (see [Grok Bot](#grok-bot) under Per-client patterns).
 
-Both share the same consent points:
+The Modal and Non-Modal flows share the same consent points:
 
 1. **Browser cookies** - the model asks before reading anything. On yes it runs `setup --allow-browser-cookies`, which extracts Firefox/Safari cookies (never Chrome unless `FROM_BROWSER=auto` or a named Chromium browser is explicitly configured) to unlock X/Twitter and other logged-in sources, and installs yt-dlp + the keyless Digg CLI. On no it runs setup without `--allow-browser-cookies` (or with `FROM_BROWSER=off`), which skips all cookie reads and still installs the tools.
 2. **Full Disk Access (macOS)** - if a cookie read is permission-denied, the model surfaces the System Settings > Privacy & Security > Full Disk Access fix and offers one retry.
@@ -93,6 +95,15 @@ Both share the same consent points:
 Re-run onboarding by deleting `~/.config/last30days/.env`. The mechanical work lives in `scripts/lib/setup_wizard.py`; the consent conversation and both host flows are specified in `skills/last30days/SKILL.md` Step 0. The original v3.0.0 wizard is captured at `docs/reference/old-nux-wizard-v3.0.0.md`.
 
 ---
+
+## MCP host controls
+
+These variables configure the local Go MCP server and are read from its process environment, not from the engine's `.env` files:
+
+| Env var | Default | Accepted values | Behavior and precedence |
+|---|---|---|---|
+| `LAST30DAYS_PYTHON` | unset | An executable name or path | Selects the Python 3.12+ interpreter used by the MCP server. A caller-supplied `RunOptions.PythonPath` remains the test/caller override; otherwise this variable must resolve to an executable. When it is unset, the server looks up `python3` on `PATH`. An empty or unresolvable value is an error rather than a fallback. |
+| `LAST30DAYS_MCP_ALLOW_BROWSER_COOKIES` | unset (deny) | `1`, `true`, `yes`, or `on`, case-insensitive | A recognized truthy value removes the MCP layer's default `--no-browser-cookies` flag. Every other value keeps that denial. This switch grants no consent by itself: browser-cookie access still requires the engine's separately recorded consent and `FROM_BROWSER` configuration. |
 
 ## API keys (`.env`)
 
@@ -103,13 +114,17 @@ The skill reads keys from a `.env` file. Two locations are supported:
 
 Override the global location with `LAST30DAYS_CONFIG_DIR=/path` (or `LAST30DAYS_CONFIG_DIR=""` for no-config mode). File permissions should be `600` on POSIX hosts - the engine warns on every run if they aren't.
 
-The project-scoped file is useful for **intentional per-client setups**: drop a `.claude/last30days.env` into each client folder (`SCRAPECREATORS_API_KEY`, `INCLUDE_SOURCES`, `LAST30DAYS_MEMORY_DIR`, `BSKY_HANDLE`, etc), then opt in with `LAST30DAYS_TRUST_PROJECT_CONFIG=1` from your shell or `~/.config/last30days/.env`. Folder-mode hosts such as Codex desktop do not trust hidden project config by default, and discovery stops at the git root so unrelated parent folders cannot silently influence runs. The SessionStart status hook (`hooks/scripts/check-config.sh`) uses the same trust gate — an untrusted repo's `.claude/last30days.env` is not read at session start.
+**File syntax.** One `KEY=value` per line; whitespace around the key and value is trimmed. A line starting with `#` is a comment, and a `#` preceded by whitespace after an unquoted value starts a trailing comment (`RATE=1  # req/sec` stores `1`). A `#` glued to the value is literal (`TOKEN=abc#123` stores `abc#123`). Wrap a value in matching `"` or `'` to keep spaces or a `#` verbatim (`NAME="Jane # Doe"` stores `Jane # Doe`); no backslash escapes or `$VAR` expansion are processed. An empty value is ignored (the one exception is `LAST30DAYS_YT_PLAYER_CLIENT=`, where empty is a deliberate disable), so a secret can never be set to `""`.
 
-**`LAST30DAYS_API_KEY`** + **`LAST30DAYS_API_BASE`** - optional remote-API backend. Set BOTH to route research through a remote API endpoint instead of running the local sources: `LAST30DAYS_API_BASE` is the endpoint (there is no built-in default), and `LAST30DAYS_API_KEY` is the bearer key for it. When both are set (and `--mock` is not passed), the engine submits the topic to that endpoint, polls with progress on stderr, and prints the server's report; none of the per-source keys below are used for that run. A configured local corpus is the privacy exception: the engine bypasses the hosted backend and runs locally rather than forwarding file-derived input. Non-default `--register` selections are forwarded with the request so server-side synthesis uses the same audience preset. Leave either unset to run local sources exactly as normal. Unlike the other keys here, these two are read only from the **process environment** (export them in your shell or host config) - they are deliberately not loaded from the `.env` files above, so a project-scoped `.env` can never silently redirect research to a remote endpoint. The remote endpoint does not return the local `Report` needed for the versioned agent JSON profile; use `--emit=json --json-profile=raw` for its existing server-response JSON contract.
+The project-scoped file is useful for **intentional per-client setups**: drop a `.claude/last30days.env` into each client folder (`SCRAPECREATORS_API_KEY`, `INCLUDE_SOURCES`, `LAST30DAYS_MEMORY_DIR`, `BSKY_HANDLE`, etc), then opt in with `LAST30DAYS_TRUST_PROJECT_CONFIG=1` from your shell or `~/.config/last30days/.env`. Folder-mode hosts such as Codex desktop do not trust hidden project config by default, and discovery stops at the git root so unrelated parent folders cannot silently influence runs. An untrusted repo's `.claude/last30days.env` is not read.
+
+**`LAST30DAYS_API_KEY`** + **`LAST30DAYS_API_BASE`** - optional remote-API backend. Set BOTH to route research through a remote API endpoint instead of running the local sources: `LAST30DAYS_API_BASE` is the endpoint (there is no built-in default), and `LAST30DAYS_API_KEY` is the bearer key for it. When both are set (and `--mock` is not passed), the engine submits the topic to that endpoint, polls with progress on stderr, and prints the server's report; none of the per-source keys below are used for that run. A configured local corpus is the privacy exception: the engine bypasses the hosted backend and runs locally rather than forwarding file-derived input. The `--perplexity-search-type` flag also runs locally when a direct `PERPLEXITY_API_KEY` exists, because the hosted backend cannot apply it. Non-default `--register` selections are forwarded with the request so server-side synthesis uses the same audience preset. Leave either unset to run local sources exactly as normal. Unlike the other keys here, these two are read only from the **process environment** (export them in your shell or host config) - they are deliberately not loaded from the `.env` files above, so a project-scoped `.env` can never silently redirect research to a remote endpoint. The remote endpoint does not return the local `Report` needed for the versioned agent JSON profile; use `--emit=json --json-profile=raw` for its existing server-response JSON contract.
 
 **`BRIGHTDATA_API_KEY`** - optional, for the `amazon` source. The Bright Data CLI normally owns its own auth via `brightdata login`, so this is only needed if you would rather keep an explicit key in `.env` or the keychain. It is resolved through the standard config layering and passed to the CLI through the child process environment, never on the command line (where it would be readable from `/proc/<pid>/cmdline` by other local users on a shared host).
 
 **`LAST30DAYS_AMAZON_DOMAIN`** - optional, default `https://www.amazon.com`. The marketplace the `amazon` source searches; set it to `https://www.amazon.co.uk`, `https://www.amazon.de`, and so on. Product URLs are validated against this host, so records from other marketplaces are rejected.
+
+**`LAST30DAYS_META_ADS_COUNTRY`** - optional, default `US`. The Ad Library country the `meta_ads` source queries, as a two-letter code. The endpoint accepts exactly one country per call, so this selects it rather than widening it. There is deliberately no durable env form of the advertiser-page override: a page id belongs to one topic, and env values are inherited by every competitor sub-run in a comparison, which would render one brand's ads as every peer's. Use `--meta-ads-page` per run instead.
 
 ### Local corpus (your files)
 
@@ -150,12 +165,13 @@ python3 skills/last30days/scripts/last30days.py "MCP servers" \
 | Techmeme | `techmeme-pp-cli` on PATH (auto-installed via `... install techmeme --cli-only`) | always on if `techmeme-pp-cli` on PATH; searches Techmeme's live archive and keeps only headlines dated within the research window (undated headlines flow through as low-confidence) | yes (free, keyless) |
 | Trustpilot | `trustpilot-pp-cli` on PATH (NOT auto-installed; install on demand via `npx -y @mvanhorn/printing-press-library@0.1.16 install trustpilot --cli-only`) + (`INCLUDE_SOURCES` contains `trustpilot` **or** an explicit `--trustpilot-domain` / plan-level `trustpilot_domain`) | **opt-in, off by default**; `--trustpilot-domain=<domain>` (and per-entity `trustpilot_domain` in `--competitors-plan`) auto-activates the source for that run and bypasses the brand-shape gate. Persist with `INCLUDE_SOURCES=trustpilot` to skip per-run auto-enable. `EXCLUDE_SOURCES=trustpilot` still wins. Bare company names auto-resolve to the review-page domain via the CLI's search only when the source is already active. The session warms once before the search fan-out; a stale session does a ~10s headless-Chrome WAF-cookie harvest (set `LAST30DAYS_TRUSTPILOT_NO_BROWSER=1` to disable in cron/CI) | yes (no API key; cookie-replay after the one-time harvest) |
 | Amazon | `brightdata` CLI on PATH **and logged in** (NOT auto-installed: `npm i -g @brightdata/cli` then `brightdata login`) + (`INCLUDE_SOURCES` contains `amazon` **or** `--search` includes `amazon`) | product records with live rating, rating count, and price, plus a capped sample of recent written reviews woven as buyer voice; the emoji footer shows each product's all-time-vs-last-30-days drift | **opt-in, off by default**. Free tier is 5,000 requests/month (~$7.50 equivalent); a typical run spends 4 (1 product search + up to 3 review pulls) regardless of how many reviews come back, since billing is per request. Past the free tier it bills the account balance at $1.50 per 1,000 records (~$0.32 for a default run). `--amazon-query=<keyword>` sets the product keyword when it differs from the topic; `LAST30DAYS_AMAZON_DOMAIN` selects a non-US marketplace. `EXCLUDE_SOURCES=amazon` wins. Never auto-fires: the model requests it per run or the user enables it durably |
-| X / Twitter | one of: a signed-in `grok` CLI (opt-in: `LAST30DAYS_X_BACKEND=grok`), `AUTH_TOKEN` + `CT0` (browser cookies, Bird CLI), `XAI_API_KEY`, `XQUIK_API_KEY`, or `FROM_BROWSER` (cookie-jar auth) | X items in results | grok = Grok plan, opt-in only; cookie-jar / Bird = free; Xquik / xAI = key-based |
+| X / Twitter | one of: `X_BEARER_TOKEN` (official X API v2; opt-in outside Grok Bot: `LAST30DAYS_X_BACKEND=xapi`; covers recent posts, about the last week, unless your X developer project has full-archive access), a signed-in `grok` CLI (opt-in: `LAST30DAYS_X_BACKEND=grok`), `AUTH_TOKEN` + `CT0` (browser cookies, Bird CLI), `XAI_API_KEY`, `XQUIK_API_KEY`, or `FROM_BROWSER` (cookie-jar auth). On a Grok Bot host the bot's X connector serves X first; see [Grok Bot](#grok-bot) | X items in results | X API bearer = your X developer project's credits; grok = Grok plan, opt-in only; cookie-jar / Bird = free; Xquik / xAI = key-based |
 | TikTok | `SCRAPECREATORS_API_KEY` + `INCLUDE_SOURCES` contains `tiktok` | TikTok items | 10K free calls |
 | Instagram | `SCRAPECREATORS_API_KEY` + `INCLUDE_SOURCES` contains `instagram` | Instagram Reels | 10K free calls; raise `LAST30DAYS_TRANSCRIPT_TIMEOUT` (default 30s) if SC is slow on your network |
 | Threads | `SCRAPECREATORS_API_KEY` + `INCLUDE_SOURCES` contains `threads` | Threads items | 10K free calls |
 | Pinterest | `SCRAPECREATORS_API_KEY` + `INCLUDE_SOURCES` contains `pinterest` | Pinterest items | 10K free calls |
 | LinkedIn | `SCRAPECREATORS_API_KEY` + `INCLUDE_SOURCES` contains `linkedin` | LinkedIn posts + articles (articles rank as high signal on person topics) | 10K free calls; power-user opt-in, not offered during first-run onboarding |
+| Meta Ads | `SCRAPECREATORS_API_KEY` + (`INCLUDE_SOURCES` contains `meta_ads` **or** `--search` includes `meta_ads`) | **opt-in, off by default**; a brand's live Meta Ad Library creatives that *launched* inside the window, with ad copy, launch date, placements, CTA, landing product, any promo code, and spoken transcripts for the newest video ads. The 📣 footer names the advertiser page that was resolved, plus how much the brand is still running from before. Paid message only, never audience reaction: Meta publishes reach and spend for political ads alone, so commercial creatives carry no engagement. `--meta-ads-page=<page_id>` skips name-based resolution when it picks the wrong company or the brand advertises under product-line page names; `LAST30DAYS_META_ADS_COUNTRY` selects a non-US Ad Library (one country per call). `EXCLUDE_SOURCES=meta_ads` wins. Never auto-fires and never inferred from topic shape: on a non-brand topic, resolution returns unrelated advertisers | 10K free calls; a default run spends at most 7 (1 resolve, plus 1 more only when the first search finds no name match, + up to 2 creative pages + up to 3 transcripts), billed per request. Power-user opt-in, not offered during first-run onboarding |
 | Telegram | `SCRAPECREATORS_API_KEY` + (`--telegram-sources=<handles>` **or** `TELEGRAM_SOURCES=<handles>` + `INCLUDE_SOURCES` contains `telegram`) | **opt-in, off by default**; public channel posts only (no keyword discovery). `--telegram-sources=aipost,durov` (or `TELEGRAM_SOURCES` env) auto-activates for that run like `--trustpilot-domain`. Accepts bare handle, `@handle`, `t.me/URL`, or `t.me/s/URL`; rejects joinchat links and numeric -100 IDs. `INCLUDE_SOURCES=telegram` or `--search telegram` without a channel list does not fetch. `EXCLUDE_SOURCES=telegram` wins. `TELEGRAM_MAX_PAGES` overrides page cap (quick=1, default=3, deep=6). Never on Recommended onboarding tier. | 1 credit per live posts page; 10K free calls |
 | Xiaohongshu (RED) | logged-in x-mcp browser plugin or `xiaohongshu-mcp` service; optional `XIAOHONGSHU_API_BASE` for custom URLs | requested-only via `--search xhs` or `--search xiaohongshu`; auto-probes `http://localhost:18060` then `http://host.docker.internal:18060` | no last30days API key; depends on your local browser-session service |
 | Bluesky | `BSKY_HANDLE` + `BSKY_APP_PASSWORD` | Bluesky items | yes (app password at bsky.app) |
@@ -170,11 +186,11 @@ python3 skills/last30days/scripts/last30days.py "MCP servers" \
 
 **YouTube transcript tuning.** `LAST30DAYS_YT_SUB_LANGS` controls the comma-separated caption-language priority passed to yt-dlp and defaults to `en,es,pt`. `LAST30DAYS_YT_PLAYER_CLIENT` defaults to `android` so yt-dlp can pass YouTube's web bot-gate without cookies (search, transcripts, and comments); set it empty to disable. When `SCRAPECREATORS_API_KEY` is available, yt-dlp uses one fast attempt before the paid fallback; set `LAST30DAYS_YT_TRANSCRIPT_FAST_TIMEOUT` to the number of seconds allowed for that attempt when a throttled host needs longer than the 12-second default. A VTT completed before the timeout is reused rather than discarded. `LAST30DAYS_YT_SEARCH_TIMEOUT` sets the per-search yt-dlp deadline (default 120s). Comparison-mode fan-out also caps concurrent yt-dlp processes process-wide and caches identical searches within a run so redundant `ytsearch` calls do not self-throttle the same IP.
 
-**X backend priority (bird first).** The default X backend chain is bird (browser cookies) → xai (API key) → xurl (OAuth2 CLI) → xquik (API key). Cookies beat `XAI_API_KEY` when both are present. A leftover grok login never steals the X lane; see below.
+**X backend priority (bird first).** The default X backend chain is bird (browser cookies) → xai (API key) → xurl (OAuth2 CLI) → xquik (API key). Cookies beat `XAI_API_KEY` when both are present. A leftover grok login never steals the X lane; see below. `xapi` (the official X API v2 with `X_BEARER_TOKEN`) is opt-in on these hosts (`LAST30DAYS_X_BACKEND=xapi`), so an ambient bearer never spends X API credits when the free path comes back empty. **Grok Bot exception.** On a Grok Bot host (`LAST30DAYS_HOST=grok-bot`) the unpinned chain is the official chain instead: xapi (`X_BEARER_TOKEN`) → xai (`XAI_API_KEY`) → xurl (the X API through X's CLI). When the bot's X connector is in the session, its results come first and the chain is not called at all; see [Grok Bot](#grok-bot) under Per-client patterns.
 
 **Grok CLI (opt-in backup).** Install the Grok CLI (`curl -fsSL https://x.ai/cli/install.sh | bash`) and run `grok login`, and X can work with no X account, no browser cookies, and no `XAI_API_KEY`. However, grok is **opt-in only**: a leftover `~/.grok/auth.json` must never steal the X lane. Pin `LAST30DAYS_X_BACKEND=grok` to enable it. It is not "free" in the way the cookie path is: calls draw on your Grok plan, and depth costs several calls per run because the underlying tool caps each search at 10 posts. Results are validated before use — every returned post's ID is decoded to confirm it falls inside the requested date range, because the retrieval is performed by a language model and can otherwise return confident, well-formed posts that were never searched for.
 
-**X on cookie-less hosts.** Bird (the free X source) scrapes X using your logged-in browser cookies (`AUTH_TOKEN`/`CT0`), which agent hosts like OpenClaw, CI, or headless runs often can't supply — and scraping carries some account risk. On those, set `XQUIK_API_KEY` (or `XAI_API_KEY`) for full, ranked X coverage from a single API key: the same engagement-based ranking, first-party authorship, and handle (from/mentions) lanes the native X source gets. `--diagnose` reports whether the key is working (and flags an unpaid key).
+**X on cookie-less hosts.** Bird (the free X source) scrapes X using your logged-in browser cookies (`AUTH_TOKEN`/`CT0`), which agent hosts like OpenClaw, CI, or headless runs often can't supply — and scraping carries some account risk. On those, set `XQUIK_API_KEY` (or `XAI_API_KEY`) for full, ranked X coverage from a single API key: the same engagement-based ranking, first-party authorship, and handle (from/mentions) lanes the native X source gets. The official X API is the other keyed option: set `X_BEARER_TOKEN` and pin `LAST30DAYS_X_BACKEND=xapi`; it serves the same lanes but covers recent posts, about the last week, unless your X developer project has full-archive access. `--diagnose` reports whether the key is working (and flags an unpaid key as `payment-required`).
 
 **Extra bird cookie lookups on Linux and Mac mini.** On a MacBook the X cookie path is unchanged (Firefox/Safari/Chrome extract, gated by `FROM_BROWSER`). On **extra hosts** the engine adds two more ways to hand bird a complete `auth_token`+`ct0` pair, tried in order (first COMPLETE pair wins; no half-pair merge; nothing is ever written to the `.env` and cookie values are never printed):
 
@@ -185,7 +201,7 @@ python3 skills/last30days/scripts/last30days.py "MCP servers" \
 
 A host counts as an "extra host" when ANY of these hold: `AGENTCOOKIE=on` (explicit opt-in, any OS); the platform is Linux; a Darwin **Mac mini** (`sysctl -n hw.model` prefix `Macmini`); or a Darwin **agentcookie sink** role. The host is never inferred from the home directory, PATH, or Hermes/OpenClaw env — only those signals. A plain MacBook does no agentcookie spawn and opens no CDP socket unless `AGENTCOOKIE=on`.
 
-CDP endpoint resolution (extra hosts only, no port scan): `BROWSER_CDP_URL` if set, else port `18800` when it answers as Chrome, else `9222` + the X display number. Port `18800` is the last30days extras **NUX convention** — the agent launches a throwaway login Chrome with `SAND_CHROME_REMOTE_DEBUG_PORT=18800` (see SKILL.md's "X on Linux / Grok Bot / Mac mini"), so it is not confused with a daily Chrome profile on `9222`+display (box-chrome's own built-in default). `18800` is tried first but falls through when it yields no complete pair, so a logged-out Chrome there never shadows a logged-in profile; pin `BROWSER_CDP_URL` if a stale session answers there. A Node `--inspect` endpoint is rejected; a Chrome page target is required.
+CDP endpoint resolution (extra hosts only, no port scan): `BROWSER_CDP_URL` if set, else port `18800` when it answers as Chrome, else `9222` + the X display number. Port `18800` is the last30days extras **NUX convention** — the agent launches a throwaway login Chrome with `SAND_CHROME_REMOTE_DEBUG_PORT=18800` (see SKILL.md's "X on Linux / Mac mini"), so it is not confused with a daily Chrome profile on `9222`+display (box-chrome's own built-in default). `18800` is tried first but falls through when it yields no complete pair, so a logged-out Chrome there never shadows a logged-in profile; pin `BROWSER_CDP_URL` if a stale session answers there. A Node `--inspect` endpoint is rejected; a Chrome page target is required.
 
 **Example `.env` skeleton** (placeholders only - replace with your own values):
 
@@ -214,6 +230,10 @@ INCLUDE_SOURCES=tiktok,instagram
 # X authentication (one option only)
 AUTH_TOKEN=<your-auth-token>
 CT0=<your-ct0-token>
+# OR the official X API v2 bearer. Default on Grok Bot; elsewhere also pin
+# LAST30DAYS_X_BACKEND=xapi. Covers recent posts, about the last week, unless
+# your X developer project has full-archive access.
+# X_BEARER_TOKEN=<your-x-api-bearer-token>
 # OR xAI API key (paid)
 # XAI_API_KEY=<your-xai-key>
 # OR Xquik key-based X search
@@ -269,6 +289,7 @@ Perplexity-specific env vars:
 | `LAST30DAYS_PERPLEXITY_MAX_RESULTS` | `10` | Search API and all Agent `web_search` requests | Clamped to 1..20. |
 | `LAST30DAYS_PERPLEXITY_SEARCH_CONTEXT_SIZE` | provider default | Search API and all Agent `web_search` requests | `low`, `medium`, or `high`; omitted unless set. |
 | `LAST30DAYS_PERPLEXITY_DOMAIN_FILTER` | unset | Search API and all Agent `web_search` requests | Comma-separated domains, max 20. |
+| `LAST30DAYS_PERPLEXITY_SEARCH_TYPE` | provider default | Search API and all Agent `web_search` requests | `fast` or `web`. Direct `PERPLEXITY_API_KEY` only; OpenRouter Sonar ignores it. Does not enable the source. `--perplexity-search-type` overrides it. |
 | `LAST30DAYS_PERPLEXITY_LANGUAGE_FILTER` | unset | Search API only | Comma-separated ISO 639-1 language codes. Agent API has no equivalent. |
 | `LAST30DAYS_PERPLEXITY_COUNTRY` | unset | Search API and all Agent `web_search` requests | Two-letter country code such as `US`. |
 | `LAST30DAYS_PERPLEXITY_RECENCY_FILTER` | unset | Search API and all Agent `web_search` requests | `hour`, `day`, `week`, `month`, or `year`; exact date filters take precedence. |
@@ -288,10 +309,9 @@ everything is already in `.env`.
 
 Effective credential priority is: process env > trusted project config
 (`.claude/last30days.env`) > global config (`~/.config/last30days/.env`) >
-macOS Keychain > `pass`(1). The SessionStart status hook also checks for
-Keychain item **presence** under `last30days-<KEY>` without reading secret
-values, so a Keychain-only setup is treated as configured instead of showing the
-first-run welcome again.
+macOS Keychain > `pass`(1). A Keychain-only setup still counts as configured:
+the engine resolves `last30days-<KEY>` at runtime. First-run in SKILL.md
+Step 0 must not treat a missing `.env` as unconfigured.
 
 | Platform | Source | Store keys with | Lookup convention |
 |---|---|---|---|
@@ -451,6 +471,30 @@ python3 skills/last30days/scripts/last30days.py "Listen Labs" --hiring-signals
 
 The engine treats public jobs/careers postings as evidence of focus or priority shifts, not exact roadmap predictions. Standard company runs may include Hiring Signals automatically when multiple current roles support the same interpretation; weak or unavailable hiring evidence is omitted.
 
+### `--x-posts` flag
+
+`--x-posts <path>` hands the engine an X result the hosting model fetched through its own X connector; it replaces the engine's X fetch for that run and works on any host. The value is a file path only (inline JSON exits `2`): a regular `.json` file in the `last30days-x-posts/1` shape, never read from inside the config dir or a credential store.
+
+| Field | Meaning |
+| --- | --- |
+| `schema`, `generated_at`, `topic`, `window {from, to}`, `provider`, `status` | Envelope header. `status` is `ok`, `partial`, or `error`; `error` is a short category (`credits`, `not-connected`, `unavailable`, `window-unsupported`), never raw tool output. `topic` must match the run topic and `generated_at` must be under 6 hours old, or the run fails closed with exit `2`. |
+| `calls[]` | One entry per connector call: `lane` (`topic`, `from`, `mention`, `related`), `handles` (a subset of the run's `--x-handle` / `--x-related` handles), and `posts`. |
+| `posts[]` | Flat rows with exactly eight fields: `id`, `author_handle`, `created_at`, `text`, `likes`, `reposts`, `replies`, `quotes`. Any other key is ignored and counted. |
+
+Limits: 8 MiB, strict UTF-8, at most 20 calls, 500 rows per call, 1,000 rows in total, 10,000 characters of text per row. Rows are rebuilt from validated parts: the citation is always `https://x.com/<handle>/status/<id>` (a row-supplied URL is never used), rows without an id or text, outside the window, or whose date disagrees with the id are dropped and counted, and an id sequence that looks generated rejects the whole file. The envelope is single-serve for the run. The hosted backend (`LAST30DAYS_API_BASE`) rejects the flag with exit `2`. Comparison runs take the per-entity `x_posts` field of `--competitors-plan` instead; a bare `--x-posts` on a comparison run exits `2`.
+
+```bash
+python3 skills/last30days/scripts/last30days.py "<topic>" --x-posts /tmp/x-posts.json
+```
+
+### `setup --store-key`
+
+`setup --store-key <NAME>` persists one credential to the global `.env` (mode `600`) from a single line on stdin, without echoing it: stdout shows `NAME=****` plus a JSON line `{"persisted": true, "key": "NAME"}`. `NAME` must be one of the credential names the engine loads from `.env` (for example `X_BEARER_TOKEN`, `XAI_API_KEY`, `SCRAPECREATORS_API_KEY`); an unknown name or an empty value exits `2`. Running it again with a new value replaces the stored one (rotating a rejected credential); other lines in the file are untouched.
+
+```bash
+printf '%s\n' "$TOKEN" | python3 skills/last30days/scripts/last30days.py setup --store-key X_BEARER_TOKEN
+```
+
 ---
 
 ## Health check (`doctor`)
@@ -477,7 +521,10 @@ Every live run writes its JSON result to `~/.config/last30days/doctor-cache.json
 | --- | --- |
 | `LAST30DAYS_DOCTOR_TTL` | Freshness window for `doctor --cached`, in **seconds**. Defaults to `900` (15 minutes). `0` makes every `--cached` call run live. |
 | `LAST30DAYS_DOCTOR_PROBE_TIMEOUT` | Per-source deadline (**seconds**) for `doctor --probe` live checks. Defaults to `10`. Caps each concurrent probe so a slow source cannot hang the command. |
-| `LAST30DAYS_X_BACKEND` | Pins the X backend (`bird` / `xai` / `xurl` / `xquik` / `grok`); doctor renders the pin and predicts "will use" accordingly. The unpinned auto chain is bird → xai → xurl → xquik (grok is opt-in only). Pin `grok` to enable it; a leftover `~/.grok/auth.json` is never auto-selected. |
+| `LAST30DAYS_HOST` | Host self-identification. `grok-bot` switches X to the official chain (xapi → xai → xurl) and turns off browser-session discovery; any other value, or unset, leaves every host exactly as today. Persisted to `.env` by first-run setup on Grok Bot and exported per invocation by the skill; doctor prints the resolved value. The engine never infers the host any other way. |
+| `X_BEARER_TOKEN` | App-only bearer for the official X API v2 (`xapi`). First rung of the chain on Grok Bot; opt-in elsewhere via `LAST30DAYS_X_BACKEND=xapi`. Full-archive search is tried first, then recent search, so coverage is recent posts, about the last week, unless your X developer project has full-archive access (the outcome detail says `window truncated to 7 days` when the fallback ran, and `search stopped at the lane deadline; results may be incomplete` when the shared 150s lane budget cut a search short). Exhausted credits (HTTP 402) report as `payment-required`. Doctor checks presence only, never the network. Loaded from `.env`, Keychain, or `pass` like the other keys. |
+| `LAST30DAYS_X_HOST_LANE` | `1` declares that the hosting model's X connector is in this session, so `--diagnose` and planning list `x` as available and the run expects `--x-posts`. Read from the process environment only: a `.env` line is ignored (doctor says so), so a removed connector never leaves a stale declaration. A run with the signal but no `--x-posts` records X as `error` ("connector result not passed"). |
+| `LAST30DAYS_X_BACKEND` | Pins the X backend (`bird` / `xai` / `xurl` / `xquik` / `grok` / `xapi`); doctor renders the pin and predicts "will use" accordingly. The unpinned auto chain is bird → xai → xurl → xquik (grok and xapi are opt-in only). Pin `grok` to enable it; a leftover `~/.grok/auth.json` is never auto-selected. Pin `xapi` to use `X_BEARER_TOKEN` on an ordinary host. On a Grok Bot host the unpinned chain is the official chain (xapi → xai → xurl) and this pin is the only way to select a backend outside it; the pin keeps its exclusive, no-failover meaning there, and doctor names the pinned backend. |
 | `AGENTCOOKIE` | `on` opts any host (incl. a MacBook) into the extra bird cookie lookups (agentcookie sidecar + live Chrome CDP); `off` disables the agentcookie sidecar reader. Unset uses host detection (Linux / Mac mini / Darwin sink get the extras). See "Extra bird cookie lookups" above. |
 | `BROWSER_CDP_URL` | Explicit Chrome DevTools endpoint (e.g. `http://127.0.0.1:18800`) for the extra-host CDP cookie lookup. Preferred over the `18800` / `9222`+`$DISPLAY` defaults. Extra hosts only. |
 | `LAST30DAYS_REDDIT_BACKEND` | `scrapecreators` makes ScrapeCreators the primary Reddit backend; doctor renders Reddit's conditional routing with the pin applied. |
@@ -491,7 +538,7 @@ By default a research run exits `0` even when a source failed mid-run (rate-limi
 
 | Var | Effect |
 | --- | --- |
-| `LAST30DAYS_STRICT_EXIT` | Truthy (`1`/`true`/`yes`/`on`): the engine exits `3` when any source outcome is neither `ok`, `no-results`, nor `skipped-unconfigured`. A one-line `strict-exit: degraded sources: ...` note goes to stderr. Default (unset): exit `0`, unchanged behavior. |
+| `LAST30DAYS_STRICT_EXIT` | Truthy (`1`/`true`/`yes`/`on`): the engine exits `3` when any source outcome is neither `ok`, `no-results`, nor `skipped-unconfigured` (so `partial`, `auth-failed`, `payment-required` for exhausted credits, `rate-limited`, and the other failure states all count as degraded). A one-line `strict-exit: degraded sources: ...` note goes to stderr. Default (unset): exit `0`, unchanged behavior. |
 
 Exit codes with the flag on: `0` clean run, `3` completed-but-degraded (report was produced), non-zero others unchanged (hard failures). Same hybrid pattern as `LAST30DAYS_DEBUG` — works shell-exported or in `.env`.
 
@@ -656,6 +703,22 @@ For competitor-vs-comparisons that recur, a pre-written JSON skeleton per client
 ```
 
 Pass as `--competitors-plan @client/competitors-plan.json` (or as a string). See `SKILL.md` section "If QUERY_TYPE = COMPARISON" for the full schema.
+
+### Grok Bot
+
+On a Grok Bot host the bot exports `LAST30DAYS_HOST=grok-bot` on every engine call (first-run setup also persists it to `.env`), and X search runs through official channels only, in this order:
+
+1. **X connector (primary).** Add the "X for Grok Bot" plugin and connect your X account in Grok Bot settings (it provisions an X developer account for you; paid Grok Bot plans include X API credits). When one of the plugin's post-search tools is in the session, the bot exports `LAST30DAYS_X_HOST_LANE=1`, fetches the posts itself, writes them to a `last30days-x-posts/1` file, and passes it with `--x-posts <path>` (see [`--x-posts` flag](#--x-posts-flag)). Connector calls draw on the credits included with Grok Bot and cover the full research window. `--diagnose` lists `x` as available whenever the lane signal is set; a run with the signal but no `--x-posts` file records X as `error` ("connector result not passed").
+2. **`X_BEARER_TOKEN` (backup).** An app-only bearer from the X developer console, funded by your own X developer project. The engine tries full-archive search first and falls back to recent search, so coverage is recent posts, about the last week, unless your X developer project has full-archive access; the outcome detail says `window truncated to 7 days` when the fallback ran. Exhausted credits (HTTP 402) report as `payment-required`, which `LAST30DAYS_STRICT_EXIT` treats as degraded.
+3. **`XAI_API_KEY` (backup).** xAI's licensed X search from console.x.ai: full window, topic search only (no from/mention handle lanes).
+
+Persist either key without echoing it:
+
+```bash
+printf '%s\n' "$TOKEN" | python3 skills/last30days/scripts/last30days.py setup --store-key X_BEARER_TOKEN
+```
+
+Browser sessions are not read on this host, and no login window is opened; `setup` still installs the free CLIs. Doctor prints the resolved host value, so a missing `LAST30DAYS_HOST` export is visible at a glance.
 
 ---
 
